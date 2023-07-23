@@ -3,14 +3,15 @@
   "version": "1.0.0",
   "description": "Organizador automatico de fotografias",
   "main": "app.js",
+  "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "Christian Espinoza Balderrama",
   "license": "ISC",
   "dependencies": {
-    "@ff0000-ad-tech/unix-path-literal": "git://github.com/gmcdev/unix-path-literal.git",
-    "fecha": "^3.0.3",
+    "@ff0000-ad-tech/unix-path-literal": "^1.0.2",
+    "fecha": "^4.2.3",
     "minimist": "^1.2.0",
     "readline-sync": "^1.4.9"
   }

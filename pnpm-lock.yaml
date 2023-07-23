@@ -1,0 +1,38 @@
+lockfileVersion: '6.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+dependencies:
+  '@ff0000-ad-tech/unix-path-literal':
+    specifier: ^1.0.2
+    version: 1.0.2
+  fecha:
+    specifier: ^4.2.3
+    version: 4.2.3
+  minimist:
+    specifier: ^1.2.0
+    version: 1.2.8
+  readline-sync:
+    specifier: ^1.4.9
+    version: 1.4.10
+
+packages:
+
+  /@ff0000-ad-tech/unix-path-literal@1.0.2:
+    resolution: {integrity: sha512-Xbc/JTsbQU144BNHegvqCyHrCxGThaO52LhPr2LBnx0wmokPWs8E/qtM15RKlouQdDQIyybZe/y5OpugLbDv+g==}
+    dev: false
+
+  /fecha@4.2.3:
+    resolution: {integrity: sha512-OP2IUU6HeYKJi3i0z4A19kHMQoLVs4Hc+DPqqxI2h/DPZHTm/vjsfC6P0b4jCMy14XizLBqvndQ+UilD7707Jw==}
+    dev: false
+
+  /minimist@1.2.8:
+    resolution: {integrity: sha512-2yyAR8qBkN3YuheJanUpWC5U3bb5osDywNB8RzDVlDwDHbocAJveqqj1u8+SVD7jkWT4yvsHCpWqqWqAxb0zCA==}
+    dev: false
+
+  /readline-sync@1.4.10:
+    resolution: {integrity: sha512-gNva8/6UAe8QYepIQH/jQ2qn91Qj0B9sYjMBBs3QOB8F2CXcKgLxQaJRP76sWVRQt+QU+8fAkCbCvjjMFu7Ycw==}
+    engines: {node: '>= 0.8.0'}
+    dev: false
