@@ -2,17 +2,23 @@
   "name": "organizer",
   "version": "1.0.0",
   "description": "Organizador automatico de fotografias",
-  "main": "src/app.js",
+  "main": "dist/app.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc",
+    "start": "node dist/app.js"
   },
   "author": "Christian Espinoza Balderrama",
   "license": "ISC",
   "dependencies": {
+    "@commander-js/extra-typings": "^11.0.0",
     "@ff0000-ad-tech/unix-path-literal": "^1.0.2",
-    "fecha": "^4.2.3",
-    "minimist": "^1.2.0",
-    "readline-sync": "^1.4.9"
+    "exiftool-vendored": "^22.0.0",
+    "fecha": "^4.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.4.4",
+    "typescript": "^5.1.6",
+    "tsx": "^3.12.7"
   }
 }
