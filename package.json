@@ -17,7 +17,8 @@
     "fecha": "^4.2.3",
     "log-update": "^5.0.1",
     "md5-file": "^5.0.0",
-    "ora": "^6.3.1"
+    "ora": "^6.3.1",
+    "p-map": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.4.4",

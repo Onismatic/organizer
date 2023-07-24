@@ -26,6 +26,9 @@ dependencies:
   ora:
     specifier: ^6.3.1
     version: 6.3.1
+  p-map:
+    specifier: ^6.0.0
+    version: 6.0.0
 
 devDependencies:
   '@types/node':
@@ -527,6 +530,11 @@ packages:
       stdin-discarder: 0.1.0
       strip-ansi: 7.1.0
       wcwidth: 1.0.1
+    dev: false
+
+  /p-map@6.0.0:
+    resolution: {integrity: sha512-T8BatKGY+k5rU+Q/GTYgrEf2r4xRMevAN5mtXc2aPc4rS1j3s+vWTaO2Wag94neXuCAUAs8cxBL9EeB5EA6diw==}
+    engines: {node: '>=16'}
     dev: false
 
   /readable-stream@3.6.2:

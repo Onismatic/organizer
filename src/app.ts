@@ -21,6 +21,7 @@ const program = new Command()
   .option('--use-creation-date', 'Use the creation date of the file instead of the exif date. By default = false.', false)
   .option('-v, --verbose', 'Shows more information about the process.')
   .option('-h, --help', 'Shows this text of help.')
+  .option('-t, --threads <number>', 'Number of threads to use, by default = 1.', '8')
   .parse();
 
 export type OrganizerOptions = ReturnType<typeof program.opts>;

@@ -2,9 +2,10 @@ import fs from "fs/promises";
 import path from "path";
 import { ExifTool } from "exiftool-vendored";
 import fecha from "fecha";
-import fsSync from "fs";
+import fsSync, {Dirent} from "fs";
 import md5File from "md5-file";
 import ora, {Ora} from 'ora';
+import pMap from "p-map";
 
 import * as readlinePromises from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
@@ -108,7 +109,7 @@ class FileOrganizer {
     let files = await fs.readdir(folderPath, {withFileTypes: true});
     const activeFileList: FileOperation[] = [];
 
-    for (const file of files) {
+    const mapper = async (file: Dirent) => {
       let pathRes = path.normalize(path.join(folderPath, file.name));
 
       if (file.isFile()) {
@@ -122,7 +123,7 @@ class FileOrganizer {
         const [checkSum, creationDate] = await Promise.all([
           md5File(pathRes),
           this.getCreationDate(pathRes),
-        ])
+        ]);
 
         if (!this.duplicationHashDictionary[checkSum]) {
           this.duplicationHashDictionary[checkSum] = [];
@@ -156,7 +157,9 @@ class FileOrganizer {
         const filesInFolder = await this.buildFilesTree(pathRes, spinner);
         activeFileList.push(...filesInFolder);
       }
-    }
+    };
+
+    await pMap(files, mapper, {concurrency: parseInt(this.options.threads)});
 
     return activeFileList;
   }
@@ -166,7 +169,7 @@ class FileOrganizer {
 
     let files = await fs.readdir(folderPath, {withFileTypes: true});
 
-    for (const file of files) {
+    const mapper = async (file: Dirent) => {
       let pathRes = path.normalize(path.join(folderPath, file.name));
 
       if (file.isFile()) {
@@ -180,7 +183,9 @@ class FileOrganizer {
       } else if (file.isDirectory()) {
         await this.getDestinationFilesCheckSums(pathRes, spinner);
       }
-    }
+    };
+
+    await pMap(files, mapper, {concurrency: parseInt(this.options.threads)});
   }
 
   async getExifDate(filePath: string) {
