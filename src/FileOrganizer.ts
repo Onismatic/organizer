@@ -1,6 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
-import { ExifTool } from "exiftool-vendored";
+import {ExifTool} from "exiftool-vendored";
 import fecha from "fecha";
 import fsSync, {Dirent} from "fs";
 import md5File from "md5-file";
@@ -8,14 +8,10 @@ import ora, {Ora} from 'ora';
 import pMap from "p-map";
 
 import * as readlinePromises from 'node:readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
+import {stdin as input, stdout as output} from 'node:process';
+import {OrganizerOptions} from "./app";
+
 const readline = readlinePromises.createInterface({input, output});
-
-import { OrganizerOptions } from "./app";
-
-type DuplicationHashDictionary = {
-  [checkSum: string]: string[]
-}
 
 type OperationsCheckSumsDone = string[];
 
@@ -24,9 +20,24 @@ type FileOperation = {
   path: string;
   newPath: string | null;
   action: Actions | null;
-  creationDate: string;
-  checkSum: string;
+  creationDate: string | null;
+  checkSum: string | null;
   error?: string;
+}
+
+type SrcFileCheckSum = {
+  [path: string]: {
+    checkSum: string;
+    creationDate: string;
+  }
+}
+
+type HashedPaths = {
+  [checkSum: string]: string[];
+}
+
+type DestFileCheckSum = {
+  [path: string]: string;
 }
 
 enum Actions {
@@ -34,6 +45,8 @@ enum Actions {
   COPIED = "COPIED",
   LINKED = "LINKED",
   SKIPPED = "SKIPPED",
+  SKIPPED_DUPLICATE = "SKIPPED_DUPLICATE",
+  SKIPPED_EXISTING = "SKIPPED_EXISTING",
   DELETED = "DELETED",
   DELETED_DUPLICATE = "DELETED_DUPLICATE",
   DELETED_EXISTING = "DELETED_EXISTING",
@@ -43,67 +56,256 @@ enum Actions {
 class FileOrganizer {
   inputFolder: string;
   outputFolder: string;
+  saveOutputFolder: string;
   options: OrganizerOptions;
 
   exiftool: ExifTool;
 
   filesList: FileOperation[] = [];
-  duplicationHashDictionary: DuplicationHashDictionary = {};
-  operationsCheckSumsDone: OperationsCheckSumsDone = [];
-  destinationFilesCheckSum: string[] = [];
+  destFileList: string[] = [];
 
-  filesFound = 0;
-  duplicateFilesFound = 0;
-  foldersFound = 0;
-  uniqueFiles = 0;
+  operationsCheckSumsDone: OperationsCheckSumsDone = [];
+  srcDuplicationMap: HashedPaths = {};
+  destDuplicationMap: HashedPaths = {};
+
+  srcFilesInfo: SrcFileCheckSum = {};
+  destFilesInfo: DestFileCheckSum = {};
+
+  srcFilesCount = 0;
+  destFilesCount = 0;
+  srcDuplicationCount = 0;
+  destDuplicationCount = 0;
+  uniqueFilesCount = 0;
+  foldersCount = 0;
+
+
+  currentAction = "";
 
   operationsDone = 0;
   operationsErrorCount = 0;
   filesSkippedAlreadyExist = 0;
+  destFilesTotal = 0;
 
   constructor(inputFolder: string, outputFolder: string, options: OrganizerOptions) {
-    this.inputFolder = inputFolder;
-    this.outputFolder = outputFolder;
+    this.inputFolder = path.resolve(inputFolder);
+    this.outputFolder = path.resolve(outputFolder);
     this.options = options;
     this.exiftool = new ExifTool({taskTimeoutMillis: 5000});
+
+    if (this.options.save && this.options.saveOutput != '') {
+      if (!this._validateSaveOutputFolder()) {
+        console.error(`The path ${this.options.saveOutput} is not a directory.`);
+        process.exit();
+      }
+
+      this.saveOutputFolder = path.resolve(this.options.saveOutput);
+    } else {
+      this.saveOutputFolder = this.outputFolder;
+    }
+  }
+
+  async loadChecksums() {
+    const checksumsSpinner = ora(`Loading checksums...`).start();
+    await Promise.all([
+      this.loadSourceFilesCheckSum(),
+      this.loadDestinationFilesCheckSum(),
+    ]);
+    checksumsSpinner.stopAndPersist({symbol: "✔️", text: `Checksums loaded.\n`});
+  }
+
+  async loadDestinationFilesAndInfo() {
+    const destinationFilesSpinner = ora(`Loading destination files...\n\n`).start();
+    this.destFileList = await this.loadDestinationFiles(this.outputFolder);
+    await this.loadDestinationFilesInfo(async () => {
+      destinationFilesSpinner.text = `Loading destination files...\n\n${this.currentAction}`;
+    });
+    this.destFilesTotal = this.destFileList.length;
+    destinationFilesSpinner.stopAndPersist({symbol: "✔️", text: `Destination files loaded. ${this.destFilesTotal} files found.\n`});
+  }
+
+  async loadSourceFilesAndInfo() {
+    const srcFilesSpinner = ora({
+      text: this._spinnerTextLoadingFiles(),
+      spinner: 'dots',
+    }).start();
+
+    const spinnerUpdater = async () => {
+      srcFilesSpinner.text = this._spinnerTextLoadingFiles();
+    }
+
+    this.filesList = await this.loadFileList(this.inputFolder, spinnerUpdater);
+    await this.loadFilesInfo(this.filesList, spinnerUpdater);
+
+    srcFilesSpinner.stopAndPersist({
+      symbol: "✔️",
+      text: this._spinnerTextLoadingFiles(),
+    });
+  }
+
+  async saveSourceChecksums(date: string) {
+    console.log(`Saving source files checksums...`)
+
+    if (!fsSync.existsSync(this.saveOutputFolder)) {
+      await fs.mkdir(this.saveOutputFolder, {recursive: true});
+    }
+
+    await fs.writeFile(path.join(this.saveOutputFolder, `file-list-checksum-${date}.orgz.json`), JSON.stringify(this.srcFilesInfo, null, 2));
+  }
+
+  async organizeFilesAndUpdateList() {
+    const operationsSpinner = ora(this._buildOperationsSpinnerText(`Initializing...`)).start();
+    this.filesList = await this.organizeFiles(this.filesList, operationsSpinner);
+    operationsSpinner.stopAndPersist({symbol: "✔️", text: this._buildOperationsSpinnerText(`Done.`)});
   }
 
   async organize() {
-    const buildingSpinner = ora(this._buildSpinnerText()).start();
-    this.filesList = await this.buildFilesTree(this.inputFolder, buildingSpinner);
-    this.uniqueFiles = Object.keys(this.duplicationHashDictionary).length;
+    const date = fecha.format(new Date(), "YY-MM-DD_HH-mm-ss");
 
-    buildingSpinner.stopAndPersist({symbol: "✔️", text: this._buildSpinnerText(true)});
+    if (this.options.destinationChecksums != '' || this.options.sourceChecksums != '') {
+      await this.loadChecksums();
+    }
 
     if (fsSync.existsSync(path.resolve(this.outputFolder))) {
-      const destinationFilesSpinner = ora(`Getting destination files check sums...`).start();
-      await this.getDestinationFilesCheckSums(this.outputFolder, destinationFilesSpinner);
-      destinationFilesSpinner.stopAndPersist({symbol: "✔️", text: `Destination files check sums done. ${this.destinationFilesCheckSum.length} files found.\n`});
+      await this.loadDestinationFilesAndInfo();
+
+      if (this.options.save) {
+        console.log(`Saving destination files checksums...`)
+        await fs.writeFile(path.join(this.saveOutputFolder, `dest-checksums-${date}.orgz.json`), JSON.stringify(this.destFilesInfo, null, 2));
+      }
     }
 
-    const operationsSpinner = ora(this._buildOperationsSpinnerText(`Initializing...`)).start();
-    this.filesList = await this.execOperations(this.filesList, operationsSpinner);
-    operationsSpinner.stopAndPersist({symbol: "✔️", text: this._buildOperationsSpinnerText(`Done.`)});
+    await this.loadSourceFilesAndInfo();
 
     if (this.options.save) {
-      const date = fecha.format(new Date(), "DD-MM-YYYY_HH-mm-ss");
-      await fs.writeFile(this.inputFolder + `organizer-tree-${date}.json`, JSON.stringify(this.filesList, null, 2));
-      await fs.writeFile(this.inputFolder + `organizer-duplication-hash-dictionary-${date}.json`, JSON.stringify(this.duplicationHashDictionary, null, 2));
-      await fs.writeFile(this.inputFolder + `organizer-hashed-dictionary-file-action-${date}.json`, JSON.stringify(this.operationsCheckSumsDone, null, 2));
+      await this.saveSourceChecksums(date);
+    }
+
+    await this.organizeFilesAndUpdateList();
+
+    if (this.options.save) {
+      await fs.writeFile(path.join(this.saveOutputFolder, `file-list-${date}.orgz.json`), JSON.stringify(this.filesList, null, 2));
     }
   }
 
-  _buildSpinnerText(done = false) {
-    const info = `Files: ${this.filesFound}\nDuplicate files: ${this.duplicateFilesFound}\nFolders: ${this.foldersFound}`;
 
-    if (done) {
-      return `File structure built.\n\n${info}\n`;
+  _isSrcFileCheckSum(obj: any): obj is SrcFileCheckSum {
+    // Check if obj is an object
+    if (typeof obj !== 'object' || obj === null) return false;
+
+    // Check each key/value in the object
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        const value = obj[key];
+
+        // Check if the value is an object with properties 'checkSum' and 'creationDate'
+        if (
+          typeof value !== 'object' ||
+          value === null ||
+          typeof value.checkSum !== 'string' ||
+          typeof value.creationDate !== 'string'
+        ) {
+          return false;
+        }
+      }
     }
 
-    return `Building file structure...\n\n${info}`;
+    // If all keys pass the check, obj is SrcFileCheckSum
+    return true;
   }
 
-  async buildFilesTree(folder: string, spinner?: Ora): Promise<FileOperation[]> {
+
+  _validateSaveOutputFolder() {
+    const saveOutputFolder = path.resolve(this.options.saveOutput);
+    const exists = fsSync.existsSync(saveOutputFolder);
+
+    if (!exists) {
+      return true;
+    }
+
+    return fsSync.statSync(saveOutputFolder).isDirectory();
+  }
+
+  _spinnerTextLoadingFiles() {
+    const title = `Loading files...`;
+    const files = `Files found: ${this.srcFilesCount}`;
+    const folders = `Folders found: ${this.foldersCount}`;
+    const srcDuplicates = `Duplicated files in source: ${this.srcDuplicationCount}`
+    const destDuplicates = `Duplicated files in destination: ${this.destDuplicationCount}`
+    const uniqueFiles = `Unique files: ${this.uniqueFilesCount}`;
+
+    return `${title}\n\n${this.currentAction}\n\n${files}\n${folders}\n${uniqueFiles}\n${srcDuplicates}\n${destDuplicates}`;
+  }
+
+  async loadSourceFilesCheckSum() {
+    if (!fsSync.existsSync(this.options.sourceChecksums)) {
+      return;
+    }
+
+    try {
+      const sourceFilesCheckSum = await fs.readFile(this.options.sourceChecksums, {encoding: "utf-8"});
+      const sourceFilesCheckSumObject = JSON.parse(sourceFilesCheckSum);
+
+      // Check if the file format match with SrcFileCheckSum
+      if (!this._isSrcFileCheckSum(sourceFilesCheckSumObject)) {
+        console.error(`The file ${this.options.sourceChecksums} is not a valid source files checksums file.`);
+        process.exit();
+      }
+
+      this.srcFilesInfo = sourceFilesCheckSumObject;
+
+    } catch (error: any) {
+      console.error(`An error occurred while loading source files checksums.\n\nError: `, error);
+    }
+  }
+
+  _isDestFileCheckSum(obj: any): obj is DestFileCheckSum {
+    // Check if obj is an object
+    if (typeof obj !== 'object' || obj === null) return false;
+
+    // Check each key/value in the object
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        const value = obj[key];
+
+        // Check if the value is a string
+        if (typeof value !== 'string') {
+          return false;
+        }
+      }
+    }
+
+    // If all keys pass the check, obj is DestFileCheckSum
+    return true;
+  }
+
+  async loadDestinationFilesCheckSum() {
+    if (!fsSync.existsSync(this.options.destinationChecksums)) {
+      return;
+    }
+
+    try {
+      const destinationFilesCheckSum = await fs.readFile(this.options.destinationChecksums, {encoding: "utf-8"});
+      const checksums = JSON.parse(destinationFilesCheckSum);
+
+      // Check if the file format match with DestFileCheckSum
+      if (!this._isDestFileCheckSum(checksums)) {
+        console.error(`The file ${this.options.destinationChecksums} is not a valid destination files checksums file.`);
+        // Ask if the user wants to continue without the checksums
+        const answer = await readline.question(`Do you want to continue without the checksums? (y/n) `);
+        if (answer.toLowerCase() !== "y") {
+          process.exit();
+        } else {
+          return;
+        }
+      }
+
+      this.destFilesInfo = checksums;
+    } catch (error: any) {
+      console.error(`An error occurred while loading destination files checksums.\n\nError: `, error);
+    }
+  }
+
+  async loadFileList(folder: string, updateCallback?: () => Promise<void>): Promise<FileOperation[]> {
     const folderPath = path.resolve(folder);
 
     let files = await fs.readdir(folderPath, {withFileTypes: true});
@@ -113,48 +315,22 @@ class FileOrganizer {
       let pathRes = path.normalize(path.join(folderPath, file.name));
 
       if (file.isFile()) {
-        this.filesFound++;
-
-        if (spinner) {
-          spinner.text = this._buildSpinnerText();
-          spinner.render();
-        }
-
-        const [checkSum, creationDate] = await Promise.all([
-          md5File(pathRes),
-          this.getCreationDate(pathRes),
-        ]);
-
-        if (!this.duplicationHashDictionary[checkSum]) {
-          this.duplicationHashDictionary[checkSum] = [];
-        } else {
-          this.duplicateFilesFound++;
-
-          if (spinner) {
-            spinner.text = this._buildSpinnerText();
-            spinner.render();
-          }
-        }
-
-        this.duplicationHashDictionary[checkSum].push(pathRes);
-
         activeFileList.push({
           folderPath: folderPath,
           path: pathRes,
           action: null,
           newPath: null,
-          creationDate,
-          checkSum,
+          creationDate: null,
+          checkSum: null,
         });
+
+        this.srcFilesCount++;
+        updateCallback ? updateCallback() : null;
       } else if (file.isDirectory()) {
-        this.foldersFound++;
+        this.foldersCount++;
+        updateCallback ? updateCallback() : null;
 
-        if (spinner) {
-          spinner.text = this._buildSpinnerText();
-          spinner.render();
-        }
-
-        const filesInFolder = await this.buildFilesTree(pathRes, spinner);
+        const filesInFolder = await this.loadFileList(pathRes, updateCallback);
         activeFileList.push(...filesInFolder);
       }
     };
@@ -164,29 +340,121 @@ class FileOrganizer {
     return activeFileList;
   }
 
-  async getDestinationFilesCheckSums(folder: string, spinner?: Ora) {
+  async loadFilesInfo(files: FileOperation[], updateCallback?: () => Promise<void>) {
+    let progress = 0;
+    const total = files.length;
+
+    const updateProgress = () => {
+      progress++;
+      const percentage = ((progress / total) * 100).toFixed(2);
+      this.currentAction = `Reading files info: ${progress} of ${total} (${percentage}%)`;
+      if (updateCallback) updateCallback();
+    }
+
+    const checkSrcDuplications = (checkSum: string, path: string) => {
+      if (!this.srcDuplicationMap[checkSum]) {
+        this.srcDuplicationMap[checkSum] = [path];
+        return false;
+      }
+
+      this.srcDuplicationCount++;
+      this.srcDuplicationMap[checkSum].push(path);
+      return true;
+    }
+
+    const checkDestDuplications = (checkSum: string, path: string) => {
+      if (!this.destDuplicationMap[checkSum]) {
+        this.destDuplicationMap[checkSum] = [path];
+        return false;
+      }
+
+      this.destDuplicationCount++;
+      this.destDuplicationMap[checkSum].push(path);
+      return true;
+    }
+
+    const mapper = async (file: FileOperation) => {
+      if (!this.srcFilesInfo[file.path]) {
+        const [creationDate, checkSum] = await Promise.all([
+          this.getCreationDate(file.path),
+          md5File(file.path),
+        ]);
+
+        this.srcFilesInfo[file.path] = {
+          checkSum: checkSum,
+          creationDate: creationDate,
+        };
+      }
+
+      file.checkSum = this.srcFilesInfo[file.path].checkSum;
+      file.creationDate = this.srcFilesInfo[file.path].creationDate;
+
+      const isSrcDuplicated = checkSrcDuplications(file.checkSum, file.path);
+      const isDestDuplicated = checkDestDuplications(file.checkSum, file.path);
+
+      if (!isSrcDuplicated && !isDestDuplicated) {
+        this.uniqueFilesCount++;
+      }
+
+      updateProgress();
+    };
+
+    await pMap(files, mapper, {concurrency: parseInt(this.options.threads)});
+  }
+
+  async loadDestinationFiles(folder: string, updateCallback?: () => Promise<void>) {
     const folderPath = path.resolve(folder);
 
     let files = await fs.readdir(folderPath, {withFileTypes: true});
+    const filesCheckSum: string[] = [];
 
     const mapper = async (file: Dirent) => {
       let pathRes = path.normalize(path.join(folderPath, file.name));
 
       if (file.isFile()) {
-        const checkSum = await md5File(pathRes);
-        this.destinationFilesCheckSum.push(checkSum);
+        filesCheckSum.push(pathRes);
 
-        if (spinner) {
-          spinner.text = `Getting destination files check sums... ${this.destinationFilesCheckSum.length}`;
-          spinner.render();
-        }
+        this.destFilesCount++;
+        updateCallback ? updateCallback() : null;
       } else if (file.isDirectory()) {
-        await this.getDestinationFilesCheckSums(pathRes, spinner);
+        const filesInFolder = await this.loadDestinationFiles(pathRes, updateCallback);
+        filesCheckSum.push(...filesInFolder);
       }
     };
 
     await pMap(files, mapper, {concurrency: parseInt(this.options.threads)});
+    return filesCheckSum;
   }
+
+  async loadDestinationFilesInfo(updateCallback?: () => Promise<void>) {
+    let progress = 0;
+    const total = this.destFileList.length;
+    let newDestFilesInfo: DestFileCheckSum = {};
+
+    const updateProgress = () => {
+      progress++;
+      this.currentAction = `Reading destination files checksums: ${progress} of ${total} (${((progress / total) * 100).toFixed(2)}%)`;
+      if (updateCallback) updateCallback();
+    }
+
+    const mapper = async (filePath: string) => {
+      newDestFilesInfo[filePath] = this.destFilesInfo[filePath] ? this.destFilesInfo[filePath] : await md5File(filePath);
+      updateProgress();
+    };
+
+    await pMap(this.destFileList, mapper, {concurrency: parseInt(this.options.threads)});
+    // Replace the old checksums with the new ones to remove the deleted files
+    this.destFilesInfo = newDestFilesInfo;
+
+    // Add the new files to the destDuplicationMap to check for duplications
+    for (const filePath in this.destFilesInfo) {
+      if (Object.prototype.hasOwnProperty.call(this.destFilesInfo, filePath)) {
+        const checkSum = this.destFilesInfo[filePath];
+        this.destDuplicationMap[checkSum] = this.destDuplicationMap[checkSum] ? [...this.destDuplicationMap[checkSum], filePath] : [filePath];
+      }
+    }
+  }
+
 
   async getExifDate(filePath: string) {
     const tags = await this.exiftool.read(filePath, ["CreateDate"]);
@@ -208,9 +476,15 @@ class FileOrganizer {
     return exifCreationDate || await this.getFileCreationDate(filePath);
   }
 
-  async execOperations(filesOperations: FileOperation[], spinner?: Ora) {
+  async organizeFiles(filesOperations: FileOperation[], spinner?: Ora) {
     for (let index = 0; index < filesOperations.length; index++) {
       const operation = filesOperations[index];
+
+      if (!operation.checkSum || !operation.creationDate) {
+        filesOperations[index].action = Actions.SKIPPED;
+        filesOperations[index].error = 'The checksum or the creation date is null.'
+        continue;
+      }
 
       const operationDone = this.operationsCheckSumsDone.includes(operation.checkSum);
       if (operationDone) {
@@ -220,11 +494,11 @@ class FileOrganizer {
           continue;
         }
 
-        filesOperations[index].action = Actions.SKIPPED;
+        filesOperations[index].action = Actions.SKIPPED_DUPLICATE;
         continue;
       }
 
-      const fileExist = this.destinationFilesCheckSum.includes(operation.checkSum);
+      const fileExist = !!this.destFilesInfo[operation.path];
       if (fileExist) {
         if (this.options.deleteExist && this.options.move) {
           filesOperations[index] = await this.tryDeleteFile(operation, spinner);
@@ -232,16 +506,17 @@ class FileOrganizer {
           continue;
         }
 
-        filesOperations[index].action = Actions.SKIPPED;
+        filesOperations[index].action = Actions.SKIPPED_EXISTING;
         continue;
       }
 
-      const filePath = filesOperations[index].path;
-      const folderPath = filesOperations[index].folderPath;
-      const newPath = await this.getNewPath(filePath, folderPath, filesOperations[index].creationDate);
+      const filePath = operation.path;
+      const folderPath = operation.folderPath;
+      const newPath = await this.getNewPath(filePath, folderPath, operation.creationDate);
 
       if (newPath == null) {
         filesOperations[index].action = Actions.SKIPPED;
+        filesOperations[index].error = 'The new path is null or the user skip the file.'
         continue;
       }
 
@@ -294,16 +569,6 @@ class FileOrganizer {
 
     const fileName = path.basename(srcPath);
 
-    // The file already exist, so we check if the file is the same
-    const srcFileCheckSum = await md5File(srcPath);
-    const destFileCheckSum = await md5File(newPath);
-
-    if (destFileCheckSum == srcFileCheckSum) {
-      // The file is the same, so we can skip it
-      this.filesSkippedAlreadyExist++;
-      return null;
-    }
-
     if (this.options.interactive && !this.options.dryRun) {
       // Ask the user what to do
       let answer = null;
@@ -342,7 +607,7 @@ class FileOrganizer {
   }
 
   _buildOperationsSpinnerText(body: string) {
-    const totalOfOperations = (this.options.deleteDuplicates && this.options.move) ? this.filesFound : this.uniqueFiles;
+    const totalOfOperations = (this.options.deleteDuplicates && this.options.move) ? this.srcFilesCount : this.uniqueFilesCount;
     const operations = `Operations done: ${this.operationsDone + this.filesSkippedAlreadyExist} of ${totalOfOperations}`;
     const percent = `(${(((this.operationsDone + this.filesSkippedAlreadyExist) / totalOfOperations) * 100).toFixed(2)}%)`;
 

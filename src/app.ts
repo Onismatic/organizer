@@ -6,7 +6,6 @@ const program = new Command()
   .name('organizer-cli')
   .version('0.0.1')
   .description('Organizer is a cli tool to organize photos by date, instead of using the creation date of the file exiftool is used to extract the date from the exif data of the photo.')
-  .addHelpText('after', 'Usage: organizer-cli inputFolder outputFolder [options]')
   .arguments('<inputFolder> <outputFolder>')
   .option('-d, --date-format <date>', 'Structure to organize the files based on a date format, by default = "YYYY/MM/DD".', 'YYYY/MM/DD')
   .option('-m, --move', 'Move files instead of copy them. By default = false.', false)
@@ -20,14 +19,21 @@ const program = new Command()
   .option('--delete-exist', 'Delete files that already exist in the output folder. By default = false.', false)
   .option('--use-creation-date', 'Use the creation date of the file instead of the exif date. By default = false.', false)
   .option('-v, --verbose', 'Shows more information about the process.')
-  .option('-h, --help', 'Shows this text of help.')
+  .option('--save-output <file>', 'Save the output of the program to a file. By default = "".', '')
+  .option('--destination-checksums <file>', 'Use a file with checksums to avoid recalculate them. By default = "".', '')
+  .option('--source-checksums <file>', 'Use a file with checksums to avoid recalculate them. By default = "".', '')
   .option('-t, --threads <number>', 'Number of threads to use, by default = 1.', '8')
   .parse();
 
+if (program.args.length < 2) {
+  program.outputHelp();
+  process.exit(1);
+}
 export type OrganizerOptions = ReturnType<typeof program.opts>;
 
 async function main() {
-  const args = new ArgumentsValidator(program.args[0], program.args[1], program.opts());
+  const options = program.opts();
+  const args = new ArgumentsValidator(program.args[0], program.args[1], options);
 
   const fileOrganizer = new FileOrganizer(args.inputFolder, args.outputFolder, args.options);
   await fileOrganizer.organize();

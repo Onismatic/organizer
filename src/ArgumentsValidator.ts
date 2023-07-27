@@ -12,11 +12,6 @@ class ArgumentsValidator {
     this.outputFolder = outputFolder;
     this.options = options;
 
-    if (this.options.help) {
-      process.exit();
-      return;
-    }
-
     if (this.outputFolder[this.outputFolder.length - 1] != "/") {
       this.outputFolder = this.outputFolder + "/";
     }
