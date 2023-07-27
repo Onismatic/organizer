@@ -6,6 +6,9 @@ import fsSync, {Dirent} from "fs";
 import md5File from "md5-file";
 import ora, {Ora} from 'ora';
 import pMap from "p-map";
+import FileOperationHandler from "./FileOperationHandler";
+import NewPathResolver from "./NewPathResolver";
+import OperationHandler from "./OperationHandler";
 
 import * as readlinePromises from 'node:readline/promises';
 import {stdin as input, stdout as output} from 'node:process';
@@ -13,34 +16,7 @@ import {OrganizerOptions} from "./app";
 
 const readline = readlinePromises.createInterface({input, output});
 
-type OperationsCheckSumsDone = string[];
-
-type FileOperation = {
-  folderPath: string;
-  path: string;
-  newPath: string | null;
-  action: Actions | null;
-  creationDate: string | null;
-  checkSum: string | null;
-  error?: string;
-}
-
-type SrcFileCheckSum = {
-  [path: string]: {
-    checkSum: string;
-    creationDate: string;
-  }
-}
-
-type HashedPaths = {
-  [checkSum: string]: string[];
-}
-
-type DestFileCheckSum = {
-  [path: string]: string;
-}
-
-enum Actions {
+export enum Actions {
   MOVED = "MOVED",
   COPIED = "COPIED",
   LINKED = "LINKED",
@@ -60,6 +36,9 @@ class FileOrganizer {
   options: OrganizerOptions;
 
   exiftool: ExifTool;
+  fileOperationHandler: FileOperationHandler;
+  newPathResolver: NewPathResolver;
+  operationHandler: OperationHandler;
 
   filesList: FileOperation[] = [];
   destFileList: string[] = [];
@@ -81,8 +60,6 @@ class FileOrganizer {
 
   currentAction = "";
 
-  operationsDone = 0;
-  operationsErrorCount = 0;
   filesSkippedAlreadyExist = 0;
   destFilesTotal = 0;
 
@@ -91,6 +68,10 @@ class FileOrganizer {
     this.outputFolder = path.resolve(outputFolder);
     this.options = options;
     this.exiftool = new ExifTool({taskTimeoutMillis: 5000});
+
+    this.fileOperationHandler = new FileOperationHandler(options.dryRun);
+    this.newPathResolver = new NewPathResolver(outputFolder, options.dateFormat, options.interactive, options.dryRun);
+    this.operationHandler = new OperationHandler(this.fileOperationHandler);
 
     if (this.options.save && this.options.saveOutput != '') {
       if (!this._validateSaveOutputFolder()) {
@@ -489,7 +470,10 @@ class FileOrganizer {
       const operationDone = this.operationsCheckSumsDone.includes(operation.checkSum);
       if (operationDone) {
         if (this.options.deleteDuplicates && this.options.move) {
-          filesOperations[index] = await this.tryDeleteFile(operation, spinner);
+          if (spinner) {
+            spinner.text = this._buildOperationsSpinnerText(`Deleting duplicate ${operation.path}`);
+          }
+          filesOperations[index] = await this.operationHandler.tryDeleteFile(operation);
           filesOperations[index].action = Actions.DELETED_DUPLICATE;
           continue;
         }
@@ -501,7 +485,10 @@ class FileOrganizer {
       const fileExist = !!this.destFilesInfo[operation.path];
       if (fileExist) {
         if (this.options.deleteExist && this.options.move) {
-          filesOperations[index] = await this.tryDeleteFile(operation, spinner);
+          if (spinner) {
+            spinner.text = this._buildOperationsSpinnerText(`Deleting existing ${operation.path}`);
+          }
+          filesOperations[index] = await this.operationHandler.tryDeleteFile(operation);
           filesOperations[index].action = Actions.DELETED_EXISTING;
           continue;
         }
@@ -512,7 +499,7 @@ class FileOrganizer {
 
       const filePath = operation.path;
       const folderPath = operation.folderPath;
-      const newPath = await this.getNewPath(filePath, folderPath, operation.creationDate);
+      const newPath = await this.newPathResolver.getNewPath(filePath, folderPath, operation.creationDate);
 
       if (newPath == null) {
         filesOperations[index].action = Actions.SKIPPED;
@@ -523,16 +510,25 @@ class FileOrganizer {
       filesOperations[index].newPath = newPath;
 
       if (this.options.move) {
-        filesOperations[index] = await this.tryMoveFile(operation, index, spinner);
+        if (spinner) {
+          spinner.text = this._buildOperationsSpinnerText(`Moving ${operation.path} to ${newPath}`);
+        }
+        filesOperations[index] = await this.operationHandler.tryMoveFile(operation);
         continue;
       }
 
       if (this.options.link) {
-        filesOperations[index] = await this.tryLinkFile(operation, index, spinner);
+        if (spinner) {
+          spinner.text = this._buildOperationsSpinnerText(`Linking ${operation.path} to ${newPath}`);
+        }
+        filesOperations[index] = await this.operationHandler.tryLinkFile(operation);
         continue;
       }
 
-      filesOperations[index] = await this.tryCopyFile(operation, index, spinner);
+      if (spinner) {
+        spinner.text = this._buildOperationsSpinnerText(`Copying ${operation.path} to ${newPath}`);
+      }
+      filesOperations[index] = await this.operationHandler.tryCopyFile(operation);
 
       this.operationsCheckSumsDone.push(operation.checkSum);
 
@@ -543,209 +539,18 @@ class FileOrganizer {
     return filesOperations;
   }
 
-  async getNewPath(fileSrcPath: string, folderPath: string, creationDate: string) {
-    try {
-      let formatCreationDate = fecha.format(new Date(creationDate), this.options.dateFormat)
-      formatCreationDate = formatCreationDate
-        .replace(/:/g, "-")
-        .replace(/ /g, "-");
-
-      let moveToFolder = path.normalize(path.join(path.resolve(this.outputFolder), formatCreationDate));
-      const fileName = path.basename(fileSrcPath);
-      const newPath = path.normalize(path.join(moveToFolder, fileName));
-
-      return await this.checkExist(newPath, fileSrcPath, moveToFolder);
-    } catch (error: any) {
-      console.error(`An error occurred while getting creation date for file ${fileSrcPath}\n\nError: `, error);
-      return null;
-    }
-  }
-
-  async checkExist(newPath: string, srcPath: string, moveToFolder: string) {
-    if (!fsSync.existsSync(newPath)) {
-      // The file doesn't exist, so we can move it
-      return newPath;
-    }
-
-    const fileName = path.basename(srcPath);
-
-    if (this.options.interactive && !this.options.dryRun) {
-      // Ask the user what to do
-      let answer = null;
-      do {
-        answer = await readline.question(`File ${fileName} already exist in ${moveToFolder}, what do you want to do?\n1. Skip file\n2. Rename file\n3. Replace file`);
-      } while (answer != "1" && answer != "2" && answer != "3");
-
-      switch (answer) {
-        case "1":
-          return null;
-        case "2":
-          let newFileName = null;
-          do {
-            newFileName = await readline.question(`New file name for ${fileName}: `);
-          } while (newFileName == "" || fsSync.existsSync(path.join(moveToFolder, newFileName)));
-
-          return path.join(moveToFolder, newFileName);
-        case "3":
-          return newPath;
-        default:
-          return null;
-      }
-    }
-
-    const fileExtension = path.extname(fileName);
-    const fileNameWithoutExtension = path.basename(fileName, fileExtension);
-
-    let i = 1;
-    let newOutPath = null;
-    do {
-      i++;
-      newOutPath = path.join(moveToFolder, `${fileNameWithoutExtension}-${i}${fileExtension}`);
-    } while (fsSync.existsSync(newOutPath));
-
-    return newOutPath;
-  }
-
   _buildOperationsSpinnerText(body: string) {
     const totalOfOperations = (this.options.deleteDuplicates && this.options.move) ? this.srcFilesCount : this.uniqueFilesCount;
-    const operations = `Operations done: ${this.operationsDone + this.filesSkippedAlreadyExist} of ${totalOfOperations}`;
-    const percent = `(${(((this.operationsDone + this.filesSkippedAlreadyExist) / totalOfOperations) * 100).toFixed(2)}%)`;
+    const operations = `Operations done: ${this.operationHandler.operationsDone + this.filesSkippedAlreadyExist} of ${totalOfOperations}`;
+    const percent = `(${(((this.operationHandler.operationsDone + this.filesSkippedAlreadyExist) / totalOfOperations) * 100).toFixed(2)}%)`;
 
     const operationsPercent = `${operations} ${percent}`;
-    const errors = `Errors: ${this.operationsErrorCount}`;
+    const errors = `Errors: ${this.operationHandler.operationsErrorCount}`;
     const skipped = `Skipped files: ${this.filesSkippedAlreadyExist}`;
     const action = this.options.move ? "Moving" : this.options.link ? "Linking" : "Copying";
     const title = `${action} files in progress...`;
 
     return `${title}\n\n${body}\n\n${operationsPercent}\n${errors}\n${skipped}`;
-  }
-
-  async tryCopyFile(fileOperation: FileOperation, index: number, spinner?: Ora) {
-    try {
-      if (spinner) {
-        spinner.text = this._buildOperationsSpinnerText(`Copying file ${fileOperation.path} to ${fileOperation.newPath!}$`);
-        spinner.render();
-      }
-
-      await this.copyFile(fileOperation.path, fileOperation.newPath!);
-      fileOperation.action = Actions.COPIED;
-
-      this.operationsDone++;
-    } catch (error: any) {
-      fileOperation.action = Actions.ERROR;
-      fileOperation.error = error.message;
-
-      this.operationsErrorCount++;
-    }
-
-    return fileOperation
-  }
-
-  async copyFile(filePath: string, copyTo: string) {
-    if (this.options.dryRun) {
-      return;
-    }
-
-    if (!fsSync.existsSync(path.dirname(copyTo))) {
-      await fs.mkdir(path.dirname(copyTo), {recursive: true});
-    }
-
-    await fs.copyFile(filePath, copyTo);
-  }
-
-  async tryLinkFile(fileOperation: FileOperation, index: number, spinner?: Ora) {
-    try {
-      if (spinner) {
-        spinner.text = this._buildOperationsSpinnerText(`Linking file ${fileOperation.path} to ${fileOperation.newPath!}`);
-        spinner.render();
-      }
-
-      await this.linkFile(fileOperation.path, fileOperation.newPath!);
-      fileOperation.action = Actions.LINKED;
-
-      this.operationsDone++;
-    } catch (error: any) {
-      fileOperation.action = Actions.ERROR;
-      fileOperation.error = error.message;
-
-      this.operationsErrorCount++;
-    }
-
-    return fileOperation;
-  }
-
-  async linkFile(filePath: string, linkTo: string) {
-    if (this.options.dryRun) {
-      return;
-    }
-
-    if (!fsSync.existsSync(path.dirname(linkTo))) {
-      await fs.mkdir(path.dirname(linkTo), {recursive: true});
-    }
-
-    await fs.link(filePath, linkTo);
-  }
-
-  async tryMoveFile(fileOperation: FileOperation, index: number, spinner?: Ora) {
-    try {
-      if (spinner) {
-        spinner.text = this._buildOperationsSpinnerText(`Moving file ${fileOperation.path} to ${fileOperation.newPath!}`);
-        spinner.render();
-      }
-
-      await this.moveFile(fileOperation.path, fileOperation.newPath!);
-      fileOperation.action = Actions.MOVED;
-
-      this.operationsDone++;
-    } catch (error: any) {
-      fileOperation.action = Actions.ERROR;
-      fileOperation.error = error.message;
-
-      this.operationsErrorCount++;
-    }
-
-    return fileOperation;
-  }
-
-  async moveFile(filePath: string, moveTo: string) {
-    if (this.options.dryRun) {
-      return;
-    }
-
-    if (!fsSync.existsSync(path.dirname(moveTo))) {
-      await fs.mkdir(path.dirname(moveTo), {recursive: true});
-    }
-
-    await fs.rename(filePath, moveTo);
-  }
-
-  async tryDeleteFile(fileOperation: FileOperation, spinner?: Ora) {
-    try {
-      if (spinner) {
-        spinner.text = this._buildOperationsSpinnerText(`Deleting file ${fileOperation.path}`);
-        spinner.render();
-      }
-
-      await this.deleteFile(fileOperation.path);
-      fileOperation.action = Actions.DELETED;
-
-      this.operationsDone++;
-    } catch (error: any) {
-      fileOperation.action = Actions.ERROR;
-      fileOperation.error = error.message;
-
-      this.operationsErrorCount++;
-    }
-
-    return fileOperation;
-  }
-
-  async deleteFile(filePath: string) {
-    if (this.options.dryRun) {
-      return;
-    }
-
-    await fs.rm(filePath);
   }
 }
 
